@@ -109,12 +109,13 @@ class SessionTitlesMixin:
                         # An archived holder is retired identity: the canonical-title registry
                         # (Bot Mode resolves exact titles on every open) treats it as absent,
                         # so its name must transfer to the live claimant instead of blocking
-                        # it forever (#110871). Only a LIVE claimant may take the name — the
-                        # reverse case (archived row being titled over a live holder) still
-                        # raises below because this branch is reachable only for ``session_id``
-                        # rows whose own write passed the guard above.
+                        # it forever (#110871). Only a LIVE claimant may take the name;
+                        # an archived claimant still raises (inner else).
                         if not current["archived"]:
-                            conn.execute("UPDATE sessions SET title = NULL WHERE id = ?", (conflict_id,))
+                            conn.execute(
+                                "UPDATE sessions SET title = NULL, title_source = NULL WHERE id = ?",
+                                (conflict_id,),
+                            )
                         else:
                             raise ValueError(f"Title '{title}' is already in use by session {conflict_id}")
                     else:

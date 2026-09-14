@@ -1856,6 +1856,7 @@ class TestSessionTitleLineage:
         # Retired row's title was freed, so the registry has exactly one holder.
         assert db.get_session_by_title("Bot Chat")["id"] == "new"
         assert db.get_session("old")["title"] is None
+        assert db.get_session("old")["title_source"] is None
 
     def test_archived_conflict_does_not_steal_from_live_holder(self, db):
         """The archived carve-out is one-directional: an archived session being
