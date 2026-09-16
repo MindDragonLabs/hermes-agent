@@ -2610,9 +2610,21 @@ run_playwright_install() {
     shift
 
     # First attempt: native platform resolution (inherits any operator override).
-    if run_browser_install_with_timeout "$timeout_seconds" "$@" 2>/dev/null; then
+    # stderr is captured rather than sent to /dev/null: Playwright only reports
+    # its real failure mode (TLS trust, 404, disk space) there, and "failed or
+    # hung" with no output is the same undiagnosable class #87340 fixed for npm.
+    # The download progress bar stays live on stdout.
+    local pw_err_log
+    pw_err_log="$(mktemp)"
+    if run_browser_install_with_timeout "$timeout_seconds" "$@" 2>"$pw_err_log"; then
+        rm -f "$pw_err_log"
         return 0
     fi
+    if [ -s "$pw_err_log" ]; then
+        log_warn "Playwright install output:"
+        cat "$pw_err_log" >&2
+    fi
+    rm -f "$pw_err_log"
 
     # Operator already pinned the platform — their choice already applied to the
     # attempt above; a second identical run won't help.
@@ -2635,8 +2647,18 @@ run_playwright_install() {
 
     log_warn "Playwright doesn't recognize ${DISTRO} ${DISTRO_VERSION} yet — retrying with PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=$fallback"
     log_info "(apt releases newer than Playwright knows hang at this step; see #35166)"
-    PLAYWRIGHT_HOST_PLATFORM_OVERRIDE="$fallback" \
-        run_browser_install_with_timeout "$timeout_seconds" "$@"
+    pw_err_log="$(mktemp)"
+    if PLAYWRIGHT_HOST_PLATFORM_OVERRIDE="$fallback" \
+        run_browser_install_with_timeout "$timeout_seconds" "$@" 2>"$pw_err_log"; then
+        rm -f "$pw_err_log"
+        return 0
+    fi
+    if [ -s "$pw_err_log" ]; then
+        log_warn "Playwright retry output:"
+        cat "$pw_err_log" >&2
+    fi
+    rm -f "$pw_err_log"
+    return 1
 }
 
 configure_browser_env_from_system_browser() {
