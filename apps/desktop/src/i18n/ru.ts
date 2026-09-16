@@ -3576,6 +3576,7 @@ export const ru = defineLocale({
       thought: 'Помыслил',
       thoughtBriefly: 'Кратко подумал',
       thoughtFor: duration => `Думал ${duration}`,
+      copyThought: 'Скопировать мысли',
       turnDuration: duration => `Этот ход занял ${duration}`,
       today: time => `Сегодня, ${time}`,
       yesterday: time => `Вчера, ${time}`,

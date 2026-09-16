@@ -22,6 +22,7 @@ import { ActivityTimerText } from '@/components/chat/activity-timer-text'
 import { GeneratedImage } from '@/components/chat/generated-image-result'
 import { SCAFFOLD_LABEL_CLASS, SCAFFOLD_META_CLASS, ScaffoldRow } from '@/components/chat/scaffold-row'
 import { useOnboardingChatActive } from '@/components/onboarding-chat/assembly'
+import { CopyButton } from '@/components/ui/copy-button'
 import { useI18n } from '@/i18n'
 import { connectorCalls, mcpTargets } from '@/lib/connector-tools'
 import { generatedImageFromResult } from '@/lib/generated-images'
@@ -161,13 +162,17 @@ const TimelineMarkdownText: FC<TimelineTextPartProps> = ({ completedAt, timestam
 const ThinkingDisclosure: FC<{
   children: ReactNode
   completedAt?: number
+  // Raw text of every reasoning part in the group — what the header copy
+  // button puts on the clipboard. The rendered body is markdown; copying
+  // re-parses would hand the user decoration, not the thought.
+  copyText: string
   messageRunning?: boolean
   pending?: boolean
   timestamp?: number
   // Required: the block's duration is remembered against this key, so a
   // component that mounts after the block finished can still report it.
   timerKey: string
-}> = ({ children, completedAt, messageRunning = false, pending = false, timestamp, timerKey }) => {
+}> = ({ children, completedAt, copyText, messageRunning = false, pending = false, timestamp, timerKey }) => {
   const { t } = useI18n()
   const reasoningCollapsedByDefault = useStore($reasoningCollapsedByDefault)
   // `null` = no explicit user toggle yet. Live reasoning remains visible by
@@ -230,9 +235,37 @@ const ThinkingDisclosure: FC<{
     // growth needs the pin; the height rides the RO entry, reflow-free.
     let lastHeight = -1
     let following = true
+    // Selecting must not fight the pin: a live preview re-pins on every
+    // growth, and each scrollTop jump yanks the content out from under an
+    // in-progress drag-select (bots stream reasoning for minutes, so this
+    // was the whole copy experience). Suppress the pin while the pointer is
+    // down in the body or a selection lives inside it; normal follow resumes
+    // once the selection clears.
+    let pointerInBody = false
+
+    const selectionInBody = () => {
+      const selection = document.getSelection()
+
+      return Boolean(selection && !selection.isCollapsed && selection.anchorNode && el.contains(selection.anchorNode))
+    }
 
     const trackScroll = () => {
       following = el.scrollHeight - el.scrollTop - el.clientHeight < PREVIEW_RELOCK_THRESHOLD_PX
+    }
+
+    const onPointerDown = () => {
+      pointerInBody = true
+    }
+
+    const onPointerUp = () => {
+      pointerInBody = false
+      trackScroll()
+    }
+
+    const onSelectionChange = () => {
+      if (!selectionInBody()) {
+        trackScroll()
+      }
     }
 
     const pin = (entries: readonly ResizeObserverEntry[]) => {
@@ -240,7 +273,7 @@ const ThinkingDisclosure: FC<{
       const grew = height < 0 || height > lastHeight
       lastHeight = height
 
-      if (grew && following) {
+      if (grew && following && !pointerInBody && !selectionInBody()) {
         el.scrollTop = el.scrollHeight
       }
     }
@@ -250,10 +283,16 @@ const ThinkingDisclosure: FC<{
     const observer = new ResizeObserver(pin)
     observer.observe(content)
     el.addEventListener('scroll', trackScroll, { passive: true })
+    el.addEventListener('pointerdown', onPointerDown)
+    el.addEventListener('pointerup', onPointerUp)
+    document.addEventListener('selectionchange', onSelectionChange)
 
     return () => {
       observer.disconnect()
       el.removeEventListener('scroll', trackScroll)
+      el.removeEventListener('pointerdown', onPointerDown)
+      el.removeEventListener('pointerup', onPointerUp)
+      document.removeEventListener('selectionchange', onSelectionChange)
     }
     // Re-run when the disclosure toggles so the observer attaches to the new
     // DOM after expand/collapse (refs are conditionally rendered on `open`).
@@ -267,6 +306,14 @@ const ThinkingDisclosure: FC<{
       ref={enterRef}
     >
       <ScaffoldRow
+        action={
+          <CopyButton
+            appearance="tool-row"
+            className="group-hover/disclosure-row:opacity-100"
+            label={t.assistant.thread.copyThought}
+            text={copyText}
+          />
+        }
         onToggle={() => setUserOpen(!open)}
         open={open}
         trailing={
@@ -352,6 +399,18 @@ const ReasoningAccordionGroup: FC<{ children?: ReactNode; endIndex: number; star
     }, undefined)
   )
 
+  // Raw scratchpad text for the header copy button: the clipboard wants the
+  // thought, not markdown re-parse decoration. Parts trim, empties drop,
+  // blocks join with a blank line.
+  const copyText = useAuiState(s =>
+    s.message.parts
+      .slice(Math.max(0, startIndex), endIndex + 1)
+      .filter(p => p.type === 'reasoning' && typeof p.text === 'string')
+      .map(p => (p as { text: string }).text.trim())
+      .filter(text => text.length > 0)
+      .join('\n\n')
+  )
+
   if (!hasContent || guidedChat) {
     return null
   }
@@ -363,6 +422,7 @@ const ReasoningAccordionGroup: FC<{ children?: ReactNode; endIndex: number; star
     // report the running total as each block's duration.
     <ThinkingDisclosure
       completedAt={completedAt}
+      copyText={copyText}
       messageRunning={messageRunning}
       pending={pending}
       timerKey={`reasoning:${messageId}:${startIndex}`}

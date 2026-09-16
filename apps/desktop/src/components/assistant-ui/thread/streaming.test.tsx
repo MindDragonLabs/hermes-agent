@@ -640,7 +640,7 @@ describe('assistant-ui streaming renderer', () => {
     settle()
 
     await waitFor(() => {
-      expect(within(container).getByRole('button', { name: /thought/i })).toBeTruthy()
+      expect(within(container).getByRole('button', { name: /^thought/i })).toBeTruthy()
     })
 
     const settled = container.querySelector('[data-slot="aui_thinking-body"]')?.className ?? ''
@@ -698,6 +698,118 @@ describe('assistant-ui streaming renderer', () => {
     expect(body.scrollTop).toBe(height - body.clientHeight)
   })
 
+  it('copies the full raw reasoning text of a thought from its header button', async () => {
+    const writeClipboard = vi.fn().mockResolvedValue(undefined)
+    const previous = window.hermesDesktop
+    window.hermesDesktop = { writeClipboard } as unknown as Window['hermesDesktop']
+
+    try {
+      render(<GroupedReasoningHarness />)
+
+      const copy = screen.getByRole('button', { name: 'Copy thought' })
+      fireEvent.click(copy)
+
+      await waitFor(() => {
+        expect(writeClipboard).toHaveBeenCalledWith('First thought.\n\nSecond thought.')
+      })
+    } finally {
+      window.hermesDesktop = previous
+    }
+  })
+
+  it('stops following growth while the pointer is down in a live thinking preview', () => {
+    const { container } = render(<RunningMessageHarness message={assistantReasoningMessage('First thought.', true)} />)
+
+    const body = container.querySelector<HTMLDivElement>('[data-slot="aui_thinking-body"]')!
+    let height = 600
+    let top = 0
+
+    Object.defineProperties(body, {
+      clientHeight: { configurable: true, get: () => 160 },
+      scrollHeight: { configurable: true, get: () => height },
+      scrollTop: {
+        configurable: true,
+        get: () => top,
+        set: (value: number) => {
+          top = Math.max(0, Math.min(value, height - body.clientHeight))
+        }
+      }
+    })
+
+    const deliverGrowth = () =>
+      act(() => {
+        for (const observer of resizeObservers) {
+          observer.triggerFor(body.firstElementChild!, height)
+        }
+      })
+
+    deliverGrowth()
+    expect(body.scrollTop).toBe(height - body.clientHeight)
+
+    // A drag-select in progress must not be yanked to the bottom on growth…
+    fireEvent.pointerDown(body)
+    height = 900
+    deliverGrowth()
+    expect(body.scrollTop).toBe(440)
+
+    // …and normal follow resumes once the pointer is back up at the bottom.
+    fireEvent.pointerUp(body)
+    body.scrollTop = height - body.clientHeight
+    fireEvent.scroll(body)
+    height = 1200
+    deliverGrowth()
+    expect(body.scrollTop).toBe(height - body.clientHeight)
+  })
+
+  it('stops following growth while a text selection lives inside the body', () => {
+    const { container } = render(<RunningMessageHarness message={assistantReasoningMessage('First thought.', true)} />)
+
+    const body = container.querySelector<HTMLDivElement>('[data-slot="aui_thinking-body"]')!
+    let height = 600
+    let top = 0
+
+    Object.defineProperties(body, {
+      clientHeight: { configurable: true, get: () => 160 },
+      scrollHeight: { configurable: true, get: () => height },
+      scrollTop: {
+        configurable: true,
+        get: () => top,
+        set: (value: number) => {
+          top = Math.max(0, Math.min(value, height - body.clientHeight))
+        }
+      }
+    })
+
+    const deliverGrowth = () =>
+      act(() => {
+        for (const observer of resizeObservers) {
+          observer.triggerFor(body.firstElementChild!, height)
+        }
+      })
+
+    deliverGrowth()
+    expect(body.scrollTop).toBe(height - body.clientHeight)
+
+    const selection = window.document.getSelection()!
+    const range = window.document.createRange()
+    range.selectNodeContents(body.firstElementChild!)
+    selection.removeAllRanges()
+    selection.addRange(range)
+
+    height = 900
+    deliverGrowth()
+    expect(body.scrollTop).toBe(440)
+
+    selection.removeAllRanges()
+    window.document.dispatchEvent(new Event('selectionchange'))
+
+    body.scrollTop = height - body.clientHeight
+    fireEvent.scroll(body)
+    height = 1200
+    deliverGrowth()
+    expect(body.scrollTop).toBe(height - body.clientHeight)
+  })
+
   it('allows vertical handoff in both preview and expanded thinking bodies', () => {
     const { container } = render(<RunningReasoningHarness />)
     const ui = within(container)
@@ -735,7 +847,7 @@ describe('assistant-ui streaming renderer', () => {
     await waitFor(() => {
       expect(
         within(container)
-          .getByRole('button', { name: /thought/i })
+          .getByRole('button', { name: /^thought/i })
           .getAttribute('aria-expanded')
       ).toBe('true')
     })
@@ -758,7 +870,7 @@ describe('assistant-ui streaming renderer', () => {
     await waitFor(() => {
       expect(
         within(container)
-          .getByRole('button', { name: /thought/i })
+          .getByRole('button', { name: /^thought/i })
           .getAttribute('aria-expanded')
       ).toBe('false')
     })
@@ -785,7 +897,7 @@ describe('assistant-ui streaming renderer', () => {
     const ui = within(container)
 
     // Settled, so the header is past tense — a running block says "Thinking".
-    fireEvent.click(ui.getByRole('button', { name: /thought/i }))
+    fireEvent.click(ui.getByRole('button', { name: /^thought/i }))
 
     expect(container.querySelector('[data-slot="aui_reasoning-text"]')?.textContent).toBe(
       'The user is asking what this file is.'
