@@ -1012,6 +1012,96 @@ npm_cert_hint() {
     return 0
 }
 
+# Inspect npm output for the recurring non-TLS failure classes and print the
+# fix for each one found. Complements npm_cert_hint (TLS). These are the
+# signatures that actually showed up in install failure reports: a cache dir
+# owned by another user (EACCES deep in _cacache, classic after a past
+# `sudo npm`), an unsupported Node engine, a native build with no C++
+# toolchain, a registry that is unreachable, and a full disk. Each block is
+# independent — one log can match several classes. Returns 0 when any hint
+# printed.
+npm_failure_hints() {
+    local log_file="$1"
+    local hinted=1
+    [ -s "$log_file" ] || return 1
+
+    if grep -qiE 'EACCES|EPERM' "$log_file" && grep -qiE '_cacache|cache' "$log_file"; then
+        log_warn "This looks like an npm cache permissions problem — the cache directory is not writable by you."
+        log_info "  npm fails deep into its cache minutes into the install instead of saying this up front."
+        log_info "  Fix ownership, then re-run the installer:"
+        log_info "    sudo chown -R \"$(id -un)\" \"${npm_config_cache:-$HOME/.npm}\" && chmod -R u+rwX \"${npm_config_cache:-$HOME/.npm}\""
+        hinted=0
+    fi
+
+    if grep -qiE 'EBADENGINE|unsupported engine' "$log_file"; then
+        log_warn "This looks like a Node.js version mismatch — a package declares an engines range your Node doesn't satisfy."
+        log_info "  Hermes needs Node 22.22+, 24.11+, or 26+. Install a supported Node (or let the"
+        log_info "  installer manage one) and re-run; check which node npm used with: npm doctor"
+        hinted=0
+    fi
+
+    if grep -qiE 'gyp ERR|node-gyp|prebuild-install|error C[0-9]{4}|clang: error|make: \*\*\*' "$log_file"; then
+        log_warn "This looks like a failed native-module build — a C++ toolchain piece is missing."
+        log_info "  Install build tools, then re-run the installer:"
+        log_info "    Debian/Ubuntu: sudo apt install build-essential    macOS: xcode-select --install"
+        hinted=0
+    fi
+
+    if grep -qiE 'ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH' "$log_file"; then
+        log_warn "This looks like a network problem reaching the npm registry."
+        log_info "  Check connectivity and any proxy/firewall. If you need a proxy, npm reads:"
+        log_info "    npm config set https-proxy http://proxy:port   (or export npm_config_https_proxy=...)"
+        hinted=0
+    fi
+
+    if grep -qiE 'ENOSPC|no space left on device' "$log_file"; then
+        log_warn "This looks like a full disk (npm: ENOSPC)."
+        log_info "  Free some space and re-run the installer."
+        hinted=0
+    fi
+
+    return $hinted
+}
+
+# Point at npm's own debug log. npm writes a full *_debug log under
+# ${npm_config_cache:-~/.npm}/_logs on every run, even when its console output
+# is captured or silenced — the captured snippet above is often the tip of the
+# failure, and this is where the complete error chain lives. Silent when no
+# debug log exists yet (e.g. the failure happened before npm got that far).
+npm_debug_log_hint() {
+    local newest_log
+    newest_log="$(ls -t "${npm_config_cache:-$HOME/.npm}"/_logs/*-debug-0.log 2>/dev/null | head -n 1 || true)"
+    [ -n "$newest_log" ] || return 1
+    log_info "npm's full debug log (kept even when console output is captured): $newest_log"
+    return 0
+}
+
+# Probe the npm cache before spending minutes downloading into it. A cache dir
+# owned by another user (typically from a past `sudo npm`) fails with EACCES
+# deep inside _cacache after the resolve, which reads as a generic npm failure.
+# When the default cache is not writable, fall back to a Hermes-owned cache so
+# the install self-heals instead of aborting; the warning still prints the
+# chown command for users who want their default cache back. Idempotent across
+# stages: an already-exported npm_config_cache is probed as-is.
+prepare_npm_cache() {
+    local cache_dir="${npm_config_cache:-$HOME/.npm}"
+    if mkdir -p "$cache_dir" 2>/dev/null \
+        && touch "$cache_dir/.hermes-write-probe" 2>/dev/null \
+        && rm -f "$cache_dir/.hermes-write-probe" 2>/dev/null; then
+        return 0
+    fi
+
+    export npm_config_cache="$HERMES_HOME/npm-cache"
+    mkdir -p "$npm_config_cache" || {
+        log_error "Neither $cache_dir nor $npm_config_cache is writable; npm cannot cache downloads."
+        return 1
+    }
+    log_warn "npm cache $cache_dir is not writable by $(id -un) — using an isolated cache instead:"
+    log_info "  $npm_config_cache"
+    log_info "  (to repair the default cache: sudo chown -R \"$(id -un)\" \"$cache_dir\" && chmod -R u+rwX \"$cache_dir\")"
+    return 0
+}
+
 check_node() {
     log_info "Checking Node.js (for browser tools)..."
 
@@ -2737,6 +2827,11 @@ install_node_deps() {
     if [ -f "$INSTALL_DIR/package.json" ]; then
         log_info "Installing Node.js dependencies (browser tools)..."
         cd "$INSTALL_DIR"
+        # Fail fast on an unusable npm cache (owned by another user after a
+        # past `sudo npm`, read-only mount): npm would otherwise die with
+        # EACCES deep into _cacache after the resolve and read as a generic
+        # npm failure. Falls back to a Hermes-owned cache and says so.
+        prepare_npm_cache || return 1
         # Time-boxed: a stalled registry fetch would otherwise hang here with no
         # progress (same #39219 stall class as the desktop build below).
         # A failed npm install used to still print "✓ Node.js dependencies
@@ -2760,6 +2855,8 @@ install_node_deps() {
                 cat "$npm_log" >&2
             fi
             npm_cert_hint "$npm_log" || true
+            npm_failure_hints "$npm_log" || true
+            npm_debug_log_hint || true
             rm -f "$npm_log"
             restore_dirty_lockfiles "$INSTALL_DIR"
             return 1
@@ -2878,6 +2975,8 @@ install_node_deps() {
                 cat "$tui_npm_log" >&2
             fi
             npm_cert_hint "$tui_npm_log" || true
+            npm_failure_hints "$tui_npm_log" || true
+            npm_debug_log_hint || true
             rm -f "$tui_npm_log"
             restore_dirty_lockfiles "$INSTALL_DIR"
             return 1
