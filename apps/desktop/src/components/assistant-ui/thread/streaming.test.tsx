@@ -706,8 +706,15 @@ describe('assistant-ui streaming renderer', () => {
     try {
       render(<GroupedReasoningHarness />)
 
+      const toggle = screen.getByRole('button', { name: /^thought/i })
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+
       const copy = screen.getByRole('button', { name: 'Copy thought' })
       fireEvent.click(copy)
+
+      // The copy action is a sibling of the toggle — clicking it must not
+      // expand or collapse the disclosure.
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
 
       await waitFor(() => {
         expect(writeClipboard).toHaveBeenCalledWith('First thought.\n\nSecond thought.')
@@ -717,10 +724,10 @@ describe('assistant-ui streaming renderer', () => {
     }
   })
 
-  it('stops following growth while the pointer is down in a live thinking preview', () => {
-    const { container } = render(<RunningMessageHarness message={assistantReasoningMessage('First thought.', true)} />)
-
-    const body = container.querySelector<HTMLDivElement>('[data-slot="aui_thinking-body"]')!
+  // jsdom has no layout: stub the scroller geometry and drive the thinking
+  // body's ResizeObserver with explicit growth heights, the way the
+  // streaming pin sees them.
+  function stubThinkingScroll(body: HTMLDivElement) {
     let height = 600
     let top = 0
 
@@ -736,59 +743,62 @@ describe('assistant-ui streaming renderer', () => {
       }
     })
 
-    const deliverGrowth = () =>
+    return (nextHeight: number) => {
+      height = nextHeight
       act(() => {
         for (const observer of resizeObservers) {
           observer.triggerFor(body.firstElementChild!, height)
         }
       })
+    }
+  }
 
-    deliverGrowth()
-    expect(body.scrollTop).toBe(height - body.clientHeight)
+  it('stops following growth while the pointer is down in a live thinking preview', () => {
+    const { container } = render(<RunningMessageHarness message={assistantReasoningMessage('First thought.', true)} />)
+
+    const body = container.querySelector<HTMLDivElement>('[data-slot="aui_thinking-body"]')!
+    const deliverGrowth = stubThinkingScroll(body)
+
+    deliverGrowth(600)
+    const pinned = body.scrollTop
+    expect(pinned).toBe(600 - 160)
 
     // A drag-select in progress must not be yanked to the bottom on growth…
     fireEvent.pointerDown(body)
-    height = 900
-    deliverGrowth()
-    expect(body.scrollTop).toBe(440)
+    deliverGrowth(900)
+    expect(body.scrollTop).toBe(pinned)
 
-    // …and normal follow resumes once the pointer is back up at the bottom.
-    fireEvent.pointerUp(body)
-    body.scrollTop = height - body.clientHeight
+    // …including when the drag ends OUTSIDE the body (release is listened for
+    // at the document level) — and follow resumes on the very next growth,
+    // with no manual scrolling back to the bottom first.
+    fireEvent.pointerUp(window.document.body)
+    deliverGrowth(1000)
+    expect(body.scrollTop).toBe(1000 - 160)
+
+    // A cancelled gesture clears the latch the same way, and a scroll the
+    // user actually performed still unlatches follow on its own.
+    body.scrollTop = 0
     fireEvent.scroll(body)
-    height = 1200
-    deliverGrowth()
-    expect(body.scrollTop).toBe(height - body.clientHeight)
+    fireEvent.pointerDown(body)
+    deliverGrowth(1100)
+    expect(body.scrollTop).toBe(0)
+    fireEvent.pointerCancel(window.document.body)
+    deliverGrowth(1200)
+    expect(body.scrollTop).toBe(0)
+    body.scrollTop = 1200 - 160
+    fireEvent.scroll(body)
+    deliverGrowth(1300)
+    expect(body.scrollTop).toBe(1300 - 160)
   })
 
   it('stops following growth while a text selection lives inside the body', () => {
     const { container } = render(<RunningMessageHarness message={assistantReasoningMessage('First thought.', true)} />)
 
     const body = container.querySelector<HTMLDivElement>('[data-slot="aui_thinking-body"]')!
-    let height = 600
-    let top = 0
+    const deliverGrowth = stubThinkingScroll(body)
 
-    Object.defineProperties(body, {
-      clientHeight: { configurable: true, get: () => 160 },
-      scrollHeight: { configurable: true, get: () => height },
-      scrollTop: {
-        configurable: true,
-        get: () => top,
-        set: (value: number) => {
-          top = Math.max(0, Math.min(value, height - body.clientHeight))
-        }
-      }
-    })
-
-    const deliverGrowth = () =>
-      act(() => {
-        for (const observer of resizeObservers) {
-          observer.triggerFor(body.firstElementChild!, height)
-        }
-      })
-
-    deliverGrowth()
-    expect(body.scrollTop).toBe(height - body.clientHeight)
+    deliverGrowth(600)
+    const pinned = body.scrollTop
 
     const selection = window.document.getSelection()!
     const range = window.document.createRange()
@@ -796,18 +806,14 @@ describe('assistant-ui streaming renderer', () => {
     selection.removeAllRanges()
     selection.addRange(range)
 
-    height = 900
-    deliverGrowth()
-    expect(body.scrollTop).toBe(440)
+    // A keyboard selection has no pointer to track — the pin consults the
+    // selection live — and follow resumes on the next growth once it clears.
+    deliverGrowth(900)
+    expect(body.scrollTop).toBe(pinned)
 
     selection.removeAllRanges()
-    window.document.dispatchEvent(new Event('selectionchange'))
-
-    body.scrollTop = height - body.clientHeight
-    fireEvent.scroll(body)
-    height = 1200
-    deliverGrowth()
-    expect(body.scrollTop).toBe(height - body.clientHeight)
+    deliverGrowth(1000)
+    expect(body.scrollTop).toBe(1000 - 160)
   })
 
   it('allows vertical handoff in both preview and expanded thinking bodies', () => {

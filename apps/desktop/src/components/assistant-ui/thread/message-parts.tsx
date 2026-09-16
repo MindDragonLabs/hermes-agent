@@ -162,9 +162,7 @@ const TimelineMarkdownText: FC<TimelineTextPartProps> = ({ completedAt, timestam
 const ThinkingDisclosure: FC<{
   children: ReactNode
   completedAt?: number
-  // Raw text of every reasoning part in the group — what the header copy
-  // button puts on the clipboard. The rendered body is markdown; copying
-  // re-parses would hand the user decoration, not the thought.
+  // Raw text of the group's reasoning parts — the header copy button's payload.
   copyText: string
   messageRunning?: boolean
   pending?: boolean
@@ -239,8 +237,9 @@ const ThinkingDisclosure: FC<{
     // growth, and each scrollTop jump yanks the content out from under an
     // in-progress drag-select (bots stream reasoning for minutes, so this
     // was the whole copy experience). Suppress the pin while the pointer is
-    // down in the body or a selection lives inside it; normal follow resumes
-    // once the selection clears.
+    // down in the body or a selection lives inside it. Follow then resumes
+    // on the next growth once the interaction ends — only a scroll the user
+    // actually performed (the scroll listener) may unlatch it.
     let pointerInBody = false
 
     const selectionInBody = () => {
@@ -253,19 +252,24 @@ const ThinkingDisclosure: FC<{
       following = el.scrollHeight - el.scrollTop - el.clientHeight < PREVIEW_RELOCK_THRESHOLD_PX
     }
 
-    const onPointerDown = () => {
+    // Only the primary button arms the latch: a right-click's release (often
+    // never delivered after a native context menu) must not suppress follow.
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.button !== 0) {
+        return
+      }
+
       pointerInBody = true
     }
 
-    const onPointerUp = () => {
+    // Release is listened for at the document level: a drag that starts in
+    // the body can end anywhere (selecting past the edge, a cancelled
+    // gesture) and the body's own pointerup would never arrive. Deliberately
+    // no trackScroll() here — measuring after a suppressed interaction would
+    // see the growth gap and unlatch follow, contradicting the resume
+    // behavior above.
+    const onPointerRelease = () => {
       pointerInBody = false
-      trackScroll()
-    }
-
-    const onSelectionChange = () => {
-      if (!selectionInBody()) {
-        trackScroll()
-      }
     }
 
     const pin = (entries: readonly ResizeObserverEntry[]) => {
@@ -284,15 +288,15 @@ const ThinkingDisclosure: FC<{
     observer.observe(content)
     el.addEventListener('scroll', trackScroll, { passive: true })
     el.addEventListener('pointerdown', onPointerDown)
-    el.addEventListener('pointerup', onPointerUp)
-    document.addEventListener('selectionchange', onSelectionChange)
+    document.addEventListener('pointerup', onPointerRelease)
+    document.addEventListener('pointercancel', onPointerRelease)
 
     return () => {
       observer.disconnect()
       el.removeEventListener('scroll', trackScroll)
       el.removeEventListener('pointerdown', onPointerDown)
-      el.removeEventListener('pointerup', onPointerUp)
-      document.removeEventListener('selectionchange', onSelectionChange)
+      document.removeEventListener('pointerup', onPointerRelease)
+      document.removeEventListener('pointercancel', onPointerRelease)
     }
     // Re-run when the disclosure toggles so the observer attaches to the new
     // DOM after expand/collapse (refs are conditionally rendered on `open`).
@@ -399,14 +403,14 @@ const ReasoningAccordionGroup: FC<{ children?: ReactNode; endIndex: number; star
     }, undefined)
   )
 
-  // Raw scratchpad text for the header copy button: the clipboard wants the
-  // thought, not markdown re-parse decoration. Parts trim, empties drop,
-  // blocks join with a blank line.
+  // Raw scratchpad text for the header copy button. Consecutive reasoning
+  // parts are distinct blocks by construction — stream deltas coalesce into
+  // the tail part and a new part begins only at a real channel boundary
+  // (chat-messages/parts.ts) — so blocks trim and join with a blank line.
   const copyText = useAuiState(s =>
     s.message.parts
       .slice(Math.max(0, startIndex), endIndex + 1)
-      .filter(p => p.type === 'reasoning' && typeof p.text === 'string')
-      .map(p => (p as { text: string }).text.trim())
+      .flatMap(p => (p.type === 'reasoning' && typeof p.text === 'string' ? [p.text.trim()] : []))
       .filter(text => text.length > 0)
       .join('\n\n')
   )
